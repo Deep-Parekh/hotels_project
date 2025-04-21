@@ -18,3 +18,21 @@ The project uses the HotelRec dataset, which includes:
 
 Dataset source: [HotelRec GitHub Repository](https://github.com/Diego999/HotelRec)
 
+## Data Preparation
+
+Before training the models, you need to prepare the dataset:
+
+1. Download the HotelRec dataset and place `HotelRec.txt` in the `data/raw` directory.
+
+2. Run the data preparation script:
+   ```bash
+   python src/utils/prepare_data.py
+   ```
+
+   This will:
+   - Process the raw data file
+   - Create chunked parquet files in `data/processed`
+   - Show processing statistics
+
+3. The processed data will be available in `data/processed` directory.
+
