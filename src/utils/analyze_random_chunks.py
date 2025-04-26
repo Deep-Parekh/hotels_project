@@ -28,17 +28,15 @@ class ChunkAnalyzer:
         
         # Check available memory
         available_memory = psutil.virtual_memory().available / (1024 ** 3)  # in GB
-        required_memory = self.estimate_memory_usage()
         
         print(f"\nMemory Analysis:")
         print(f"Available Memory: {available_memory:.1f} GB")
-        print(f"Estimated Memory Required: {required_memory:.1f} GB")
         print(f"Number of chunks: {len(self.chunk_files)}")
         print(f"Workers: {num_workers}")
         
-        if available_memory < required_memory:
+        if available_memory < 4:
             warnings.warn(f"\nWarning: Available memory ({available_memory:.1f}GB) is less than "
-                        f"estimated required memory ({required_memory:.1f}GB).\n"
+                        f"estimated required memory (4GB).\n"
                         f"Consider reducing num_workers or increasing chunk_size.")
         
         # Initialize counters
@@ -48,19 +46,6 @@ class ChunkAnalyzer:
         self.reviews_per_author: Dict[str, int] = defaultdict(int)
         self.total_reviews = 0
 
-    def estimate_memory_usage(self) -> float:
-        """Estimate memory usage in GB."""
-        # Memory per chunk reading (based on chunk_size)
-        memory_per_chunk = (self.chunk_size * 2000) / (1024 ** 3)  # Assuming 2KB per row
-        
-        # Memory for worker processes
-        memory_per_worker = memory_per_chunk * 2  # Buffer for processing
-        
-        # Total memory estimate
-        total_memory = (memory_per_worker * self.num_workers) + 1  # +1GB for base process
-        
-        return total_memory
-        
     def process_chunk(self, chunk_file: Path) -> Tuple[Set[str], Set[str], Dict[str, int], Dict[str, int], int]:
         """Process a single chunk file and return its statistics."""
         chunk_hotels = set()
