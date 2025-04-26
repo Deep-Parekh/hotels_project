@@ -1,2 +1,10 @@
 .gitignore
 data/
+documents/
+
+src/__pycache__/*
+data/__pycache__/*
+models/__pycache__/*
+notebooks/__pycache__/*
+utils/__pycache__/*
+*.pyc
