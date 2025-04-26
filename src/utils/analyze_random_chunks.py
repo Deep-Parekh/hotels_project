@@ -152,9 +152,23 @@ class ChunkAnalyzer:
     
     def save_statistics(self, stats: Dict, output_file: str):
         """Save statistics to a JSON file."""
+        # Convert all numpy types to native Python types
+        def convert(obj):
+            if isinstance(obj, dict):
+                return {k: convert(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [convert(i) for i in obj]
+            elif isinstance(obj, (np.integer, np.int64, np.int32)):
+                return int(obj)
+            elif isinstance(obj, (np.floating, np.float64, np.float32)):
+                return float(obj)
+            else:
+                return obj
+
+        stats = convert(stats)
+
         output_path = Path(output_file)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        
         with open(output_path, 'w') as f:
             json.dump(stats, f, indent=2)
         print(f"Statistics saved to {output_path}")
