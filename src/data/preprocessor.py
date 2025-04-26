@@ -1,6 +1,5 @@
 """
-Data preprocessing module for HotelRec dataset.
-Provides functionality for text preprocessing, feature extraction, and sentiment analysis.
+Enhanced preprocessor for HotelRec dataset with improved chunked processing support.
 """
 
 import nltk
@@ -15,10 +14,9 @@ from tqdm import tqdm
 from pathlib import Path
 from typing import Dict, List, Optional, Union
 
-
 class DataPreprocessor:
     """
-    A class to preprocess hotel review data, including text processing and feature extraction.
+    A class to preprocess hotel review data, including text preprocessing, feature extraction, and sentiment analysis.
     Prepares data for both content-based and collaborative filtering models.
     
     Features:
@@ -30,12 +28,9 @@ class DataPreprocessor:
     """
     
     def __init__(self, custom_stop_words: Optional[List[str]] = None):
-        """
-        Initialize the preprocessor.
+        """Initialize preprocessor with optional custom stopwords."""
+        print("\nInitializing DataPreprocessor...")
         
-        Args:
-            custom_stop_words (Optional[List[str]]): Additional stop words to use
-        """
         # Download required NLTK data
         try:
             nltk.data.find('tokenizers/punkt')
@@ -43,6 +38,7 @@ class DataPreprocessor:
             nltk.data.find('corpora/wordnet')
             nltk.data.find('sentiment/vader_lexicon')
         except LookupError:
+            print("Downloading required NLTK data...")
             nltk.download('punkt')
             nltk.download('stopwords')
             nltk.download('wordnet')
@@ -53,6 +49,7 @@ class DataPreprocessor:
         self.sentiment_analyzer = SentimentIntensityAnalyzer()
         
         if custom_stop_words:
+            print(f"Adding {len(custom_stop_words)} custom stop words")
             self.stop_words.update(custom_stop_words)
         
         # Initialize TF-IDF vectorizer
@@ -73,6 +70,15 @@ class DataPreprocessor:
             'sleep quality', 'value', 'rooms',
             'service', 'cleanliness', 'location'
         ]
+
+        # Initialize statistics tracking
+        self.stats = {
+            'processed_chunks': 0,
+            'total_reviews': 0,
+            'error_count': 0
+        }
+        
+        print("DataPreprocessor initialization complete\n")
 
     def preprocess_text(self, text: str) -> str:
         """
@@ -121,84 +127,113 @@ class DataPreprocessor:
 
     def process_reviews(self, df: pd.DataFrame, include_tfidf: bool = False) -> pd.DataFrame:
         """
-        Process the reviews dataset for model training.
+        Process a chunk of reviews with statistics tracking.
         
         Args:
             df (pd.DataFrame): Input DataFrame with reviews
             include_tfidf (bool): Whether to include TF-IDF features
             
         Returns:
-            pd.DataFrame: Processed DataFrame ready for model training
+            pd.DataFrame: Processed DataFrame
         """
-        print("Processing reviews...")
-        processed_df = df.copy()
+        print(f"\nProcessing chunk with {len(df)} reviews...")
         
-        # Validate required columns
-        missing_cols = [col for col in self.expected_columns if col not in processed_df.columns]
-        if missing_cols:
-            raise ValueError(f"Missing required columns: {missing_cols}")
+        try:
+            # Process text fields
+            print("Processing text fields...")
+            tqdm.pandas(desc="Text preprocessing")
+            df['processed_text'] = df['text'].fillna('').progress_apply(self.preprocess_text)
+            df['processed_title'] = df['title'].fillna('').progress_apply(self.preprocess_text)
+            
+            # Add text length features
+            print("Calculating text lengths...")
+            df['text_length'] = df['text'].fillna('').str.len()
+            df['title_length'] = df['title'].fillna('').str.len()
+            
+            # Convert date to datetime
+            print("Converting dates...")
+            df['date'] = pd.to_datetime(df['date'])
+            
+            # Extract and normalize ratings
+            print("Processing ratings...")
+            for rating_name in ['sleep quality', 'value', 'rooms', 'service', 'cleanliness', 'location']:
+                col_name = f'rating_{rating_name.replace(" ", "_")}'
+                df[col_name] = df['property_dict'].apply(
+                    lambda x: x.get(rating_name, np.nan) if isinstance(x, dict) else np.nan
+                )
+            
+            # Fill missing ratings with mean
+            rating_cols = [col for col in df.columns if col.startswith('rating_')]
+            for col in rating_cols:
+                df[col] = df[col].fillna(df[col].mean())
+            
+            # Add TF-IDF features if requested
+            if include_tfidf:
+                print("Generating TF-IDF features...")
+                tfidf_matrix = self.tfidf_vectorizer.fit_transform(df['processed_text'])
+                tfidf_df = pd.DataFrame(
+                    tfidf_matrix.toarray(),
+                    columns=[f'tfidf_{i}' for i in range(tfidf_matrix.shape[1])]
+                )
+                df = pd.concat([df, tfidf_df], axis=1)
+            
+            # Update statistics
+            self.stats['processed_chunks'] += 1
+            self.stats['total_reviews'] += len(df)
+            
+            print(f"Chunk processing complete: {len(df)} reviews processed\n")
+            return df
+            
+        except Exception as e:
+            self.stats['error_count'] += 1
+            print(f"\nError processing chunk: {str(e)}")
+            raise
+
+    def _validate_review_structure(self, review: Dict) -> None:
+        """
+        Validate the structure of a review dictionary.
         
-        # Process text fields
-        print("Processing text fields...")
-        tqdm.pandas(desc="Text preprocessing")
-        processed_df['processed_text'] = processed_df['text'].fillna('').progress_apply(self.preprocess_text)
-        processed_df['processed_title'] = processed_df['title'].fillna('').progress_apply(self.preprocess_text)
+        Args:
+            review (Dict): Review dictionary to validate
+            
+        Raises:
+            ValueError: If required fields are missing or invalid
+        """
+        required_fields = {
+            'hotel_url': str,
+            'author': str,
+            'date': str,
+            'rating': (int, float),
+            'title': str,
+            'text': str
+        }
         
-        # Add text length features
-        processed_df['text_length'] = processed_df['text'].fillna('').str.len()
-        processed_df['title_length'] = processed_df['title'].fillna('').str.len()
-        
-        # Add sentiment analysis
-        print("Analyzing sentiment...")
-        tqdm.pandas(desc="Sentiment analysis")
-        
-        # Title sentiment
-        title_sentiments = processed_df['title'].fillna('').progress_apply(self.get_sentiment_scores)
-        processed_df['title_sentiment_compound'] = title_sentiments.apply(lambda x: x['compound'])
-        processed_df['title_sentiment_positive'] = title_sentiments.apply(lambda x: x['pos'])
-        processed_df['title_sentiment_neutral'] = title_sentiments.apply(lambda x: x['neu'])
-        processed_df['title_sentiment_negative'] = title_sentiments.apply(lambda x: x['neg'])
-        
-        # Review text sentiment
-        text_sentiments = processed_df['text'].fillna('').progress_apply(self.get_sentiment_scores)
-        processed_df['text_sentiment_compound'] = text_sentiments.apply(lambda x: x['compound'])
-        processed_df['text_sentiment_positive'] = text_sentiments.apply(lambda x: x['pos'])
-        processed_df['text_sentiment_neutral'] = text_sentiments.apply(lambda x: x['neu'])
-        processed_df['text_sentiment_negative'] = text_sentiments.apply(lambda x: x['neg'])
-        
-        # Add sentiment agreement features
-        processed_df['sentiment_rating_agreement'] = (
-            (processed_df['title_sentiment_compound'] > 0) & (processed_df['rating'] > 3) |
-            (processed_df['title_sentiment_compound'] < 0) & (processed_df['rating'] < 3)
-        ).astype(int)
-        
-        # Convert date to datetime
-        processed_df['date'] = pd.to_datetime(processed_df['date'])
-        
-        # Extract and normalize ratings from property_dict
-        print("Extracting property ratings...")
-        for rating_name in self.property_ratings:
-            col_name = f'rating_{rating_name.replace(" ", "_")}'
-            processed_df[col_name] = processed_df['property_dict'].apply(
-                lambda x: x.get(rating_name, np.nan) if isinstance(x, dict) else np.nan
+        for field, expected_type in required_fields.items():
+            if field not in review:
+                raise ValueError(f"Missing required field: {field}")
+            
+            if not isinstance(review[field], expected_type):
+                raise ValueError(f"Invalid type for {field}: expected {expected_type}, got {type(review[field])}")
+
+    def get_stats(self) -> Dict:
+        """
+        Get preprocessing statistics.
+        """
+        stats = {
+            **self.stats,
+            'average_reviews_per_chunk': (
+                self.stats['total_reviews'] / self.stats['processed_chunks']
+                if self.stats['processed_chunks'] > 0 else 0
             )
+        }
         
-        # Fill missing ratings with mean
-        rating_cols = [col for col in processed_df.columns if col.startswith('rating_')]
-        for col in rating_cols:
-            processed_df[col] = processed_df[col].fillna(processed_df[col].mean())
+        print("\nPreprocessing Statistics:")
+        print(f"Total chunks processed: {stats['processed_chunks']}")
+        print(f"Total reviews processed: {stats['total_reviews']:,}")
+        print(f"Average reviews per chunk: {stats['average_reviews_per_chunk']:,.1f}")
+        print(f"Total errors encountered: {stats['error_count']}\n")
         
-        # Add TF-IDF features if requested
-        if include_tfidf:
-            print("Generating TF-IDF features...")
-            tfidf_matrix = self.tfidf_vectorizer.fit_transform(processed_df['processed_text'])
-            tfidf_df = pd.DataFrame(
-                tfidf_matrix.toarray(),
-                columns=[f'tfidf_{i}' for i in range(tfidf_matrix.shape[1])]
-            )
-            processed_df = pd.concat([processed_df, tfidf_df], axis=1)
-        
-        return processed_df
+        return stats
 
     def save_processed_data(self, 
                           df: pd.DataFrame, 

@@ -12,13 +12,13 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, random_split
 import numpy as np
 from tqdm import tqdm
-from typing import Dict, List
+from typing import Dict, List, Optional, Union
 
 # Add project root to path
 project_root = Path(__file__).resolve().parents[2]
 sys.path.append(str(project_root))
 
-from src.data.dataset import HotelReviewDataset, CFMatrixDataset
+from src.data.dataset import ChunkedHotelReviewDataset, ChunkedCFMatrixDataset
 from src.models.content_based import ContentBasedModel
 from src.models.collaborative import MatrixFactorization
 from src.models.hybrid_recommender import HybridRecommender
@@ -40,13 +40,15 @@ class ModelTrainer:
                 'learning_rate': 0.001,
                 'num_epochs': 10,
                 'hidden_dim': 128,
-                'dropout': 0.3
+                'dropout': 0.3,
+                'chunk_size': 10000
             },
             'collaborative': {
                 'batch_size': 256,
                 'learning_rate': 0.001,
                 'num_epochs': 10,
-                'embedding_dim': 32
+                'embedding_dim': 32,
+                'chunk_size': 10000
             },
             'hybrid': {
                 'batch_size': 128,
@@ -65,103 +67,86 @@ class ModelTrainer:
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     def prepare_content_based_data(self):
-        """Prepare datasets for content-based model."""
+        """Prepare datasets for content-based model using chunked loading."""
         print("\nPreparing content-based datasets...")
         
-        # Load dataset
-        dataset = HotelReviewDataset(project_root / "data/processed")
-        
-        # Split dataset
-        train_size = int(0.8 * len(dataset))
-        val_size = int(0.1 * len(dataset))
-        test_size = len(dataset) - train_size - val_size
-        
-        train_dataset, val_dataset, test_dataset = random_split(
-            dataset, [train_size, val_size, test_size]
+        # Create chunked datasets
+        full_dataset = ChunkedHotelReviewDataset(
+            data_dir=project_root / "data/processed",
+            chunk_size=self.config['content_based']['chunk_size']
         )
         
         # Create data loaders
-        cfg = self.config['content_based']
         train_loader = DataLoader(
-            train_dataset,
-            batch_size=cfg['batch_size'],
+            full_dataset,
+            batch_size=self.config['content_based']['batch_size'],
             shuffle=True,
             num_workers=4,
             pin_memory=True
         )
         
+        # For validation and testing, we use smaller chunks
+        val_dataset = ChunkedHotelReviewDataset(
+            data_dir=project_root / "data/processed",
+            chunk_size=10000,  # Smaller chunks for validation
+            shuffle=False
+        )
+        
         val_loader = DataLoader(
             val_dataset,
-            batch_size=cfg['batch_size'],
+            batch_size=self.config['content_based']['batch_size'],
             shuffle=False,
-            num_workers=4,
+            num_workers=2,
             pin_memory=True
         )
         
-        test_loader = DataLoader(
-            test_dataset,
-            batch_size=cfg['batch_size'],
-            shuffle=False,
-            num_workers=4,
-            pin_memory=True
-        )
+        print(f"Dataset information:")
+        print(f"- Total samples: {full_dataset.total_samples:,}")
+        print(f"- Feature dimensions: {full_dataset.get_feature_dims()}")
         
-        print(f"Dataset sizes:")
-        print(f"- Train: {len(train_dataset):,}")
-        print(f"- Validation: {len(val_dataset):,}")
-        print(f"- Test: {len(test_dataset):,}")
-        
-        return train_loader, val_loader, test_loader, dataset.get_feature_dims()
+        return train_loader, val_loader, val_loader, full_dataset.get_feature_dims()
 
     def prepare_cf_data(self):
-        """Prepare datasets for collaborative filtering model."""
+        """Prepare datasets for collaborative filtering using chunked loading."""
         print("\nPreparing collaborative filtering datasets...")
         
-        # Load dataset
-        dataset = CFMatrixDataset(project_root / "data/processed")
-        
-        # Split dataset
-        train_size = int(0.8 * len(dataset))
-        val_size = int(0.1 * len(dataset))
-        test_size = len(dataset) - train_size - val_size
-        
-        train_dataset, val_dataset, test_dataset = random_split(
-            dataset, [train_size, val_size, test_size]
+        # Create chunked datasets
+        full_dataset = ChunkedCFMatrixDataset(
+            data_dir=project_root / "data/processed",
+            chunk_size=self.config['collaborative']['chunk_size']
         )
         
         # Create data loaders
-        cfg = self.config['collaborative']
         train_loader = DataLoader(
-            train_dataset,
-            batch_size=cfg['batch_size'],
+            full_dataset,
+            batch_size=self.config['collaborative']['batch_size'],
             shuffle=True,
             num_workers=4,
             pin_memory=True
         )
         
+        # For validation and testing, we use smaller chunks
+        val_dataset = ChunkedCFMatrixDataset(
+            data_dir=project_root / "data/processed",
+            chunk_size=10000,  # Smaller chunks for validation
+            shuffle=False
+        )
+        
         val_loader = DataLoader(
             val_dataset,
-            batch_size=cfg['batch_size'],
+            batch_size=self.config['collaborative']['batch_size'],
             shuffle=False,
-            num_workers=4,
+            num_workers=2,
             pin_memory=True
         )
         
-        test_loader = DataLoader(
-            test_dataset,
-            batch_size=cfg['batch_size'],
-            shuffle=False,
-            num_workers=4,
-            pin_memory=True
-        )
-        
-        num_users, num_hotels = dataset.get_dims()
+        num_users, num_hotels = full_dataset.get_dims()
         print(f"Dataset dimensions:")
         print(f"- Number of users: {num_users:,}")
         print(f"- Number of hotels: {num_hotels:,}")
-        print(f"- Total interactions: {len(dataset):,}")
+        print(f"- Total interactions: {full_dataset.total_samples:,}")
         
-        return train_loader, val_loader, test_loader, (num_users, num_hotels)
+        return train_loader, val_loader, val_loader, (num_users, num_hotels)
 
     def train_content_based(self):
         """Train content-based model with organized checkpointing."""

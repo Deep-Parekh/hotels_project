@@ -1,272 +1,210 @@
 """
-Data loading module specifically designed for HotelRec dataset.
-Each line in the dataset is a JSON object containing hotel reviews with ratings and metadata.
+Enhanced data loader for HotelRec dataset with chunked processing.
+Handles large text files efficiently with minimal memory usage.
 """
 
+from __future__ import annotations
+
 import json
-from pathlib import Path
-from typing import List, Dict, Union, Optional, Iterator
 import os
+from pathlib import Path
+from typing import Dict, Iterator, List, Optional, Union
+from datetime import datetime
 
 import pandas as pd
-import numpy as np
 from tqdm import tqdm
 
 from .preprocessor import DataPreprocessor
-
+from .dataset import ChunkedHotelReviewDataset, ChunkedCFMatrixDataset
 
 class DataLoader:
-    """
-    Specialized loader for HotelRec dataset that handles its specific JSON structure.
-    
-    The dataset contains reviews with the following structure:
-    {
-        "hotel_url": str,  # Unique identifier for the hotel
-        "author": str,     # Username of the reviewer
-        "date": str,       # ISO format date
-        "rating": float,   # Overall rating (1-5)
-        "title": str,      # Review title
-        "text": str,       # Review text
-        "property_dict": {  # Sub-ratings
-            "sleep quality": float,
-            "value": float,
-            "rooms": float,
-            "service": float,
-            "cleanliness": float,
-            "location": float
-        }
-    }
-    """
-    
-    # Define expected columns and their types
-    EXPECTED_COLUMNS = {
-        'hotel_url': str,
-        'author': str,
-        'date': 'datetime64[ns]',
-        'rating': float,
-        'title': str,
-        'text': str
-    }
-    
-    # Sub-ratings in property_dict
-    PROPERTY_RATINGS = [
-        'sleep quality',
-        'value',
-        'rooms',
-        'service',
-        'cleanliness',
-        'location'
-    ]
-    
-    def __init__(self, data_path: Union[str, Path], chunk_size: int = 100000):
+    def __init__(
+        self, 
+        data_dir: Union[str, Path], 
+        chunk_size: int = 100_000,
+        processed_dir: Optional[Union[str, Path]] = None
+    ) -> None:
         """
-        Initialize the DataLoader.
+        Initialize DataLoader with configurable directories and chunk size.
         
         Args:
-            data_path (Union[str, Path]): Path to the data directory
-            chunk_size (int, optional): Number of reviews per chunk. Defaults to 100000.
+            data_dir (Union[str, Path]): Directory containing raw data
+            chunk_size (int): Number of reviews per chunk
+            processed_dir (Optional[Union[str, Path]]): Directory for processed files
         """
-        self.data_path = Path(data_path)
+        self.data_dir = Path(data_dir)
         self.chunk_size = chunk_size
-        self.preprocessor = DataPreprocessor()  # Initialize the preprocessor
+        self.processed_dir = Path(processed_dir) if processed_dir else self.data_dir.parent / "processed"
+        self.preprocessor = DataPreprocessor()
         
-        if not self.data_path.exists():
-            raise FileNotFoundError(f"Data directory not found: {self.data_path}")
-    
-    def process_large_file(self, 
-                          input_file: str,
-                          chunk_size: Optional[int] = None,
-                          include_tfidf: bool = False) -> None:
+        if not self.data_dir.exists():
+            raise FileNotFoundError(f"Data directory not found: {self.data_dir}")
+        self.processed_dir.mkdir(parents=True, exist_ok=True)
+
+    def process_large_file(
+        self,
+        input_file: str = "HotelRec.txt",
+        chunk_size: Optional[int] = None,
+        include_tfidf: bool = False,
+        resume_from: Optional[int] = None
+    ) -> None:
         """
-        Process the large HotelRec.txt file into smaller parquet files.
+        Process large text file in chunks.
         
         Args:
-            input_file (str): Name of the input file (e.g., 'HotelRec.txt')
+            input_file (str): Input file name (default: HotelRec.txt)
             chunk_size (Optional[int]): Override default chunk size
             include_tfidf (bool): Whether to include TF-IDF features
+            resume_from (Optional[int]): Chunk index to resume from
         """
-        input_path = self.data_path / input_file
-        # Change output path to be in data/processed
-        output_path = self.data_path.parent / "processed"
-        chunk_size = chunk_size or self.chunk_size
-
-        # Validate input file exists
-        if not input_path.exists():
-            raise FileNotFoundError(f"Input file not found: {input_path}")
-
-        # Create output directory if it doesn't exist
-        output_path.mkdir(parents=True, exist_ok=True)
-
-        # Get total file size for progress bar
-        total_size = os.path.getsize(input_path)
+        in_path = self.data_dir / input_file
+        n_per_shard = chunk_size or self.chunk_size
         
-        print("\nProcessing HotelRec dataset:")
-        print(f"Input file: {input_path}")
-        print(f"Output directory: {output_path}")
-        print(f"Chunk size: {chunk_size:,} reviews")
+        if not in_path.exists():
+            raise FileNotFoundError(f"Input file not found: {in_path}")
         
-        chunk_number = 0
-        reviews = []
-        stats = {
-            'processed': 0,
-            'invalid': 0,
-            'total_size': 0
-        }
+        reviews: List[Dict] = []
+        shard_idx = resume_from if resume_from is not None else 0
+        n_bad = 0
+        file_size = os.path.getsize(in_path)
         
-        with tqdm(total=total_size, unit='B', unit_scale=True, desc="Reading") as pbar:
-            with open(input_path, 'r', encoding='utf-8') as f:
-                for line_num, line in enumerate(f, 1):
-                    try:
-                        # Parse and validate each review
-                        review = json.loads(line.strip())
-                        self._validate_review(review)
-                        reviews.append(review)
-                        stats['processed'] += 1
-                        
-                        # Update progress bar
-                        pbar.update(len(line.encode('utf-8')))
-                        
-                        # Process chunk when it reaches the desired size
-                        if len(reviews) >= chunk_size:
-                            self._process_and_save_chunk(
-                                reviews, 
-                                output_path, 
-                                chunk_number,
-                                include_tfidf
-                            )
-                            chunk_number += 1
-                            reviews = []
-                            
-                    except (json.JSONDecodeError, ValueError) as e:
-                        stats['invalid'] += 1
-                        if stats['invalid'] <= 5:  # Show only first 5 errors
-                            print(f"\nError in line {line_num}: {str(e)}")
-                        continue
+        print("\n" + "="*50)
+        print(f"Starting to process: {in_path}")
+        print(f"Output directory: {self.processed_dir}")
+        print(f"Chunk size: {n_per_shard:,} reviews")
+        if resume_from is not None:
+            print(f"Resuming from chunk: {resume_from}")
+        print("="*50 + "\n")
+        
+        with tqdm(total=file_size, unit='B', unit_scale=True) as pbar:
+            for chunk_data in self._chunk_iterator(in_path, pbar):
+                if shard_idx < (resume_from or 0):
+                    shard_idx += 1
+                    continue
                 
-                # Process any remaining reviews
-                if reviews:
-                    self._process_and_save_chunk(
-                        reviews, 
-                        output_path, 
-                        chunk_number,
-                        include_tfidf
-                    )
+                processed_reviews, chunk_bad = self._process_chunk(chunk_data)
+                n_bad += chunk_bad
+                
+                if processed_reviews:
+                    self._save_chunk(processed_reviews, shard_idx, include_tfidf)
+                    shard_idx += 1
         
-        # Get preprocessing statistics
-        if chunk_number > 0:
-            sample_df = pd.read_parquet(output_path / f"reviews_chunk_0000.parquet")
-            preproc_stats = self.preprocessor.get_preprocessing_stats(sample_df)
+        print("\n" + "="*50)
+        print(f"Processing completed!")
+        print(f"Total shards created: {shard_idx+1}")
+        print(f"Total malformed lines skipped: {n_bad}")
+        print("="*50 + "\n")
+
+    def _chunk_iterator(self, file_path: Path, pbar: tqdm) -> Iterator[List[str]]:
+        """
+        Iterate over file in chunks to manage memory usage.
+        """
+        chunk: List[str] = []
+        with open(file_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                pbar.update(len(line.encode('utf-8')))
+                chunk.append(line)
+                
+                if len(chunk) >= self.chunk_size:
+                    yield chunk
+                    chunk = []
             
-            print("\nPreprocessing Statistics:")
-            print(f"- Number of reviews processed: {stats['processed']:,}")
-            print(f"- Number of unique users: {preproc_stats['num_users']:,}")
-            print(f"- Number of unique hotels: {preproc_stats['num_hotels']:,}")
-            print(f"- Invalid reviews skipped: {stats['invalid']:,}")
-            print(f"- Number of chunks created: {chunk_number + 1}")
-            
-            # Print feature statistics
-            print("\nFeature Statistics:")
-            for feat, feat_stats in preproc_stats['feature_stats'].items():
-                print(f"- {feat}:")
-                print(f"  Mean: {feat_stats['mean']:.2f}")
-                print(f"  Std: {feat_stats['std']:.2f}")
-                if feat_stats['missing'] > 0:
-                    print(f"  Missing values: {feat_stats['missing']}")
+            if chunk:  # Don't forget the last partial chunk
+                yield chunk
 
-            # Get sentiment statistics
-            print("\nSentiment Analysis Results:")
-            print(f"Average title sentiment: {preproc_stats['sentiment_analysis']['title_sentiment']['mean_compound']:.3f}")
-            print(f"Sentiment-rating agreement: {preproc_stats['sentiment_analysis']['sentiment_rating_agreement']:.1%}")
-
-    def _validate_review(self, review: Dict) -> None:
-        """Validate review structure using preprocessor's validation"""
-        self.preprocessor._validate_review_structure(review)
-
-    def _process_and_save_chunk(self, 
-                              reviews: List[Dict], 
-                              output_path: Path, 
-                              chunk_number: int,
-                              include_tfidf: bool) -> None:
+    def _process_chunk(self, lines: List[str]) -> tuple[List[Dict], int]:
         """
-        Process and save a chunk of reviews using the preprocessor.
+        Process a chunk of lines into review dictionaries.
         
-        Args:
-            reviews (List[Dict]): List of review dictionaries
-            output_path (Path): Directory to save the parquet file
-            chunk_number (int): Current chunk number
-            include_tfidf (bool): Whether to include TF-IDF features
-        """
-        # Convert reviews to DataFrame
-        df = pd.DataFrame(reviews)
-        
-        # Use preprocessor to process the chunk
-        processed_df = self.preprocessor.process_reviews(df, include_tfidf=include_tfidf)
-        
-        # Save the processed chunk
-        filename = f"reviews_chunk_{chunk_number:04d}.parquet"
-        output_file = output_path / filename
-        processed_df.to_parquet(output_file, index=False)
-        
-        chunk_stats = {
-            'size_mb': processed_df.memory_usage(deep=True).sum() / 1024**2,
-            'num_reviews': len(processed_df)
-        }
-        
-        print(f"\nProcessed and saved chunk {chunk_number}:")
-        print(f"- File: {filename}")
-        print(f"- Reviews: {chunk_stats['num_reviews']:,}")
-        print(f"- Memory usage: {chunk_stats['size_mb']:.2f} MB")
-
-    def load_parquet_chunks(self, parquet_dir: str = "processed") -> Iterator[pd.DataFrame]:
-        """
-        Load processed parquet chunks one at a time.
-        
-        Args:
-            parquet_dir (str): Directory containing parquet files
-            
-        Yields:
-            pd.DataFrame: Each chunk of the processed data
-        """
-        parquet_path = self.data_path.parent / parquet_dir
-        if not parquet_path.exists():
-            raise FileNotFoundError(f"Parquet directory not found: {parquet_path}")
-        
-        parquet_files = sorted(parquet_path.glob("*.parquet"))
-        
-        for parquet_file in tqdm(parquet_files, desc="Loading chunks"):
-            yield pd.read_parquet(parquet_file)
-
-    def get_chunk_info(self, parquet_dir: str = "processed") -> Dict:
-        """
-        Get detailed information about the processed chunks.
-        
-        Args:
-            parquet_dir (str): Directory containing parquet files
-            
         Returns:
-            Dict: Information about the chunks including number of files,
-                  total size, columns, and data types
+            tuple: (processed_reviews, number_of_bad_lines)
         """
-        parquet_path = self.data_path.parent / parquet_dir
-        if not parquet_path.exists():
-            raise FileNotFoundError(f"Parquet directory not found: {parquet_path}")
+        processed = []
+        n_bad = 0
         
-        parquet_files = list(parquet_path.glob("*.parquet"))
-        total_size = sum(f.stat().st_size for f in parquet_files)
+        for line in lines:
+            try:
+                review = json.loads(line)
+                self.preprocessor._validate_review_structure(review)
+                processed.append(review)
+            except (json.JSONDecodeError, ValueError):
+                n_bad += 1
+                continue
         
-        # Get sample of data for column info
-        if parquet_files:
-            sample_df = pd.read_parquet(parquet_files[0])
-            columns = list(sample_df.columns)
-            dtypes = sample_df.dtypes.to_dict()
-        else:
-            columns = []
-            dtypes = {}
+        return processed, n_bad
+
+    def _save_chunk(
+        self,
+        reviews: List[Dict],
+        chunk_idx: int,
+        include_tfidf: bool
+    ) -> None:
+        """
+        Save processed reviews to a JSONL file with metadata.
+        """
+        df_raw = pd.DataFrame(reviews)
+        df_proc = self.preprocessor.process_reviews(df_raw, include_tfidf=include_tfidf)
         
-        return {
-            "num_chunks": len(parquet_files),
-            "total_size_gb": total_size / (1024**3),
-            "chunk_files": [f.name for f in parquet_files],
-            "columns": columns,
-            "dtypes": {str(k): str(v) for k, v in dtypes.items()}
+        # Save as JSONL
+        jsonl_path = self.processed_dir / f"reviews_chunk_{chunk_idx:04d}.jsonl"
+        df_proc.to_json(jsonl_path, orient='records', lines=True)
+        
+        print(f"Chunk {chunk_idx:04d}: Processed {len(df_proc):,} reviews → {jsonl_path.name}")
+        
+        # Save chunk metadata
+        metadata = {
+            'chunk_index': chunk_idx,
+            'n_reviews': len(df_proc),
+            'file_size': jsonl_path.stat().st_size,
+            'columns': list(df_proc.columns),
+            'dtypes': df_proc.dtypes.astype(str).to_dict(),
+            'timestamp': datetime.now().isoformat()
         }
+        
+        meta_path = self.processed_dir / f"reviews_chunk_{chunk_idx:04d}.meta.json"
+        with open(meta_path, 'w') as f:
+            json.dump(metadata, f, indent=2)
+
+    def get_processing_status(self) -> Dict:
+        """
+        Get current processing status and statistics.
+        """
+        chunks = sorted(self.processed_dir.glob("reviews_chunk_*.jsonl"))
+        total_size = sum(f.stat().st_size for f in chunks)
+        
+        status = {
+            'n_chunks': len(chunks),
+            'total_size_gb': total_size / (1024 ** 3),
+            'last_chunk': len(chunks) - 1 if chunks else None,
+            'can_resume_from': len(chunks),
+            'processed_dir': str(self.processed_dir)
+        }
+        
+        print("\nProcessing Status:")
+        print(f"Number of chunks: {status['n_chunks']}")
+        print(f"Total size: {status['total_size_gb']:.2f} GB")
+        print(f"Last chunk: {status['last_chunk']}")
+        print(f"Can resume from: {status['can_resume_from']}")
+        print(f"Processed directory: {status['processed_dir']}\n")
+        
+        return status
+
+    def load_jsonl_chunks(self, processed_dir: Union[str, Path]) -> Iterator[pd.DataFrame]:
+        """
+        Generator that yields one processed shard at a time.
+        """
+        p_dir = Path(processed_dir)
+        for file in sorted(p_dir.glob("reviews_chunk_*.jsonl")):
+            yield pd.read_json(file, lines=True)
+
+    def get_chunk_info(self, processed_dir: Union[str, Path]) -> Dict:
+        p_dir = Path(processed_dir)
+        files = sorted(p_dir.glob("reviews_chunk_*.jsonl"))
+        total = sum(f.stat().st_size for f in files)
+        first = pd.read_json(files[0], lines=True) if files else pd.DataFrame()
+        return dict(
+            num_chunks=len(files),
+            total_size_gb=total / (1024 ** 3),
+            dtypes=first.dtypes.astype(str).to_dict(),
+            columns=list(first.columns),
+        )
