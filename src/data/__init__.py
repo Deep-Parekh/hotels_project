@@ -12,8 +12,9 @@ Handles all data-related operations for the hotel recommendation system:
 from .loader import DataLoader
 from .preprocessor import DataPreprocessor
 from .dataset import (
-    HotelReviewDataset,
-    CFMatrixDataset
+    ChunkedDataset,
+    ChunkedHotelReviewDataset,
+    ChunkedCFMatrixDataset
 )
 
 __all__ = [
@@ -21,4 +22,7 @@ __all__ = [
     'DataPreprocessor',
     'HotelReviewDataset',
     'CFMatrixDataset',
+    'ChunkedDataset',
+    'ChunkedHotelReviewDataset',
+    'ChunkedCFMatrixDataset',
 ]
