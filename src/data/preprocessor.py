@@ -54,7 +54,7 @@ class DataPreprocessor:
         
         # Initialize TF-IDF vectorizer
         self.tfidf_vectorizer = TfidfVectorizer(
-            max_features=5000,
+            max_features=100,
             min_df=5,
             max_df=0.95
         )
@@ -137,7 +137,22 @@ class DataPreprocessor:
             pd.DataFrame: Processed DataFrame
         """
         print(f"\nProcessing chunk with {len(df)} reviews...")
-        
+
+        # Strip whitespace from text fields
+        text_fields = ['author', 'hotel_url', 'title', 'text']
+        for col in text_fields:
+            if col in df.columns:
+                df[col] = df[col].astype(str).str.strip()
+
+        # Filter out reviews with invalid authors
+        before = len(df)
+        df = df[~df['author'].isin(["/undefined", "null"])]
+        df = df[df['author'].notnull()]
+        df = df[df['author'] != ""]
+        df = df[df['hotel_url'] != ""]
+        after = len(df)
+        print(f"Filtered out {before - after} reviews with invalid/empty authors or hotel URLs.")
+
         try:
             # Process text fields
             print("Processing text fields...")
@@ -170,7 +185,9 @@ class DataPreprocessor:
             # Add TF-IDF features if requested
             if include_tfidf:
                 print("Generating TF-IDF features...")
-                tfidf_matrix = self.tfidf_vectorizer.fit_transform(df['processed_text'])
+                # Combine processed_text and processed_title for TF-IDF
+                combined_text = df['processed_text'].fillna('') + " " + df['processed_title'].fillna('')
+                tfidf_matrix = self.tfidf_vectorizer.fit_transform(combined_text)
                 tfidf_df = pd.DataFrame(
                     tfidf_matrix.toarray(),
                     columns=[f'tfidf_{i}' for i in range(tfidf_matrix.shape[1])]

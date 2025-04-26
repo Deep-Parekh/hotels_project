@@ -144,7 +144,12 @@ class DataLoader:
         """
         df_raw = pd.DataFrame(reviews)
         df_proc = self.preprocessor.process_reviews(df_raw, include_tfidf=include_tfidf)
-        
+
+        # Remove original text, title, property_dict, processed_text, and processed_title fields if present
+        for col in ['text', 'title', 'property_dict', 'processed_text', 'processed_title']:
+            if col in df_proc.columns:
+                df_proc = df_proc.drop(columns=[col])
+
         # Save as JSONL
         jsonl_path = self.processed_dir / f"reviews_chunk_{chunk_idx:04d}.jsonl"
         df_proc.to_json(jsonl_path, orient='records', lines=True)
