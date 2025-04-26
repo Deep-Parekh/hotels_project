@@ -11,36 +11,30 @@ Provides supporting functionality for the recommendation system:
 - Visualization tools
 """
 
+from .data_utils import count_lines, validate_directories, save_chunk_metadata
+from .prepare_data import prepare_data
+from .prepare_random_sample import prepare_random_sample
+from .train_model import ModelTrainer
 from .helpers import (
-    EarlyStopping,
-    ModelCheckpoint,
     fit,
-    train_one_epoch,
-    evaluate,
     plot_training_history,
     plot_learning_rate,
-    create_training_summary
+    create_training_summary,
+    ModelCheckpoint,
+    EarlyStopping
 )
 
-from .train_model import ModelTrainer
-from .prepare_data import prepare_data
-
 __all__ = [
-    # Training utilities
-    'EarlyStopping',
-    'ModelCheckpoint',
+    'prepare_data',
+    'prepare_random_sample',
+    'ModelTrainer',
     'fit',
-    'train_one_epoch',
-    'evaluate',
-    
-    # Visualization
     'plot_training_history',
     'plot_learning_rate',
     'create_training_summary',
-    
-    # Main classes
-    'ModelTrainer',
-    
-    # Data preparation
-    'prepare_data',
+    'ModelCheckpoint',
+    'EarlyStopping',
+    'count_lines',
+    'validate_directories',
+    'save_chunk_metadata'
 ]
