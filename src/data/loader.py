@@ -145,10 +145,13 @@ class DataLoader:
         df_raw = pd.DataFrame(reviews)
         df_proc = self.preprocessor.process_reviews(df_raw, include_tfidf=include_tfidf)
 
-        # Remove original text, title, property_dict, processed_text, and processed_title fields if present
-        for col in ['text', 'title', 'property_dict', 'processed_text', 'processed_title']:
-            if col in df_proc.columns:
-                df_proc = df_proc.drop(columns=[col])
+        # Remove all unnecessary fields before saving
+        drop_cols = [
+            'text', 'title', 'processed_text', 'processed_title', 'property_dict',
+            'hotel_url', 'author'
+        ]
+        # Drop columns from the DataFrame
+        df_proc = df_proc.drop(columns=drop_cols)
 
         # Save as JSONL
         jsonl_path = self.processed_dir / f"reviews_chunk_{chunk_idx:04d}.jsonl"
@@ -212,4 +215,10 @@ class DataLoader:
             total_size_gb=total / (1024 ** 3),
             dtypes=first.dtypes.astype(str).to_dict(),
             columns=list(first.columns),
+        )
+
+    def save_encodings(self):
+        self.preprocessor.save_encodings(
+            hotel_path='data/processed/hotel_url_to_id.pkl',
+            author_path='data/processed/author_to_id.pkl'
         )

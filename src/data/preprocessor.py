@@ -13,6 +13,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from tqdm import tqdm
 from pathlib import Path
 from typing import Dict, List, Optional, Union
+import pickle
 
 class DataPreprocessor:
     """
@@ -78,6 +79,11 @@ class DataPreprocessor:
             'error_count': 0
         }
         
+        self.hotel_url_to_id = {}
+        self.author_to_id = {}
+        self.next_hotel_id = 0
+        self.next_author_id = 0
+        
         print("DataPreprocessor initialization complete\n")
 
     def preprocess_text(self, text: str) -> str:
@@ -125,6 +131,41 @@ class DataPreprocessor:
         
         return self.sentiment_analyzer.polarity_scores(text)
 
+    def encode_ids(self, df: pd.DataFrame) -> pd.DataFrame:
+        # Encode hotel_url
+        hotel_ids = []
+        for url in df['hotel_url']:
+            if url not in self.hotel_url_to_id:
+                self.hotel_url_to_id[url] = self.next_hotel_id
+                self.next_hotel_id += 1
+            hotel_ids.append(self.hotel_url_to_id[url])
+        df['hotel_id'] = hotel_ids
+
+        # Encode author
+        author_ids = []
+        for author in df['author']:
+            if author not in self.author_to_id:
+                self.author_to_id[author] = self.next_author_id
+                self.next_author_id += 1
+            author_ids.append(self.author_to_id[author])
+        df['author_id'] = author_ids
+
+        return df
+
+    def save_encodings(self, hotel_path='hotel_url_to_id.pkl', author_path='author_to_id.pkl'):
+        with open(hotel_path, 'wb') as f:
+            pickle.dump(self.hotel_url_to_id, f)
+        with open(author_path, 'wb') as f:
+            pickle.dump(self.author_to_id, f)
+
+    def load_encodings(self, hotel_path='hotel_url_to_id.pkl', author_path='author_to_id.pkl'):
+        with open(hotel_path, 'rb') as f:
+            self.hotel_url_to_id = pickle.load(f)
+        with open(author_path, 'rb') as f:
+            self.author_to_id = pickle.load(f)
+        self.next_hotel_id = max(self.hotel_url_to_id.values(), default=-1) + 1
+        self.next_author_id = max(self.author_to_id.values(), default=-1) + 1
+
     def process_reviews(self, df: pd.DataFrame, include_tfidf: bool = False) -> pd.DataFrame:
         """
         Process a chunk of reviews with statistics tracking.
@@ -144,7 +185,7 @@ class DataPreprocessor:
             if col in df.columns:
                 df[col] = df[col].astype(str).str.strip()
 
-        # Filter out reviews with invalid authors
+        # Filter out reviews with invalid authors or hotel_url
         before = len(df)
         df = df[~df['author'].isin(["/undefined", "null"])]
         df = df[df['author'].notnull()]
@@ -152,6 +193,9 @@ class DataPreprocessor:
         df = df[df['hotel_url'] != ""]
         after = len(df)
         print(f"Filtered out {before - after} reviews with invalid/empty authors or hotel URLs.")
+
+        # Encode hotel_url and author
+        df = self.encode_ids(df)
 
         try:
             # Process text fields
@@ -171,7 +215,14 @@ class DataPreprocessor:
             
             # Extract and normalize ratings
             print("Processing ratings...")
-            for rating_name in ['sleep quality', 'value', 'rooms', 'service', 'cleanliness', 'location']:
+            # Extract all property ratings from property_dict
+            property_dicts = df['property_dict'].apply(lambda x: x if isinstance(x, dict) else {})
+            all_ratings = set()
+            for prop_dict in property_dicts:
+                all_ratings.update(prop_dict.keys())
+            
+            # Process each rating found in property_dict
+            for rating_name in all_ratings:
                 col_name = f'rating_{rating_name.replace(" ", "_")}'
                 df[col_name] = df['property_dict'].apply(
                     lambda x: x.get(rating_name, np.nan) if isinstance(x, dict) else np.nan
@@ -182,10 +233,9 @@ class DataPreprocessor:
             for col in rating_cols:
                 df[col] = df[col].fillna(df[col].mean())
             
-            # Add TF-IDF features if requested
+            # TF-IDF from both processed_text and processed_title
             if include_tfidf:
                 print("Generating TF-IDF features...")
-                # Combine processed_text and processed_title for TF-IDF
                 combined_text = df['processed_text'].fillna('') + " " + df['processed_title'].fillna('')
                 tfidf_matrix = self.tfidf_vectorizer.fit_transform(combined_text)
                 tfidf_df = pd.DataFrame(

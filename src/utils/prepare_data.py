@@ -92,7 +92,10 @@ def prepare_data(
             include_tfidf=include_tfidf,
             resume_from=start_chunk if resume else None
         )
-        
+
+        # Save the encodings after all chunks are processed
+        loader.save_encodings()
+
         # Get final processing status
         status = loader.get_processing_status()
         
