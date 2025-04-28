@@ -28,6 +28,13 @@ def process_chunk(reviews: list, loader: DataLoader, chunk_idx: int, output_dir:
     # Process the reviews
     df_proc = loader.preprocessor.process_reviews(df_raw, include_tfidf=include_tfidf)
     
+    # Remove all unnecessary fields before saving
+    drop_cols = [
+        'text', 'title', 'processed_text', 'processed_title', 'property_dict',
+        'hotel_url', 'author'
+    ]
+    df_proc = df_proc.drop(columns=drop_cols)
+    
     # Save as JSONL
     chunk_file = output_dir / f"reviews_chunk_{chunk_idx:04d}.jsonl"
     df_proc.to_json(chunk_file, orient='records', lines=True)
@@ -177,6 +184,9 @@ def prepare_random_sample(
         print(f"- Samples processed: {n_samples:,}")
         print(f"\nProcessed data is available in: {random_processed_dir}")
         print("="*60)
+        
+        # After all chunks are processed, save the encodings
+        loader.save_encodings()
         
     except Exception as e:
         print(f"\nError during sample preparation: {str(e)}")

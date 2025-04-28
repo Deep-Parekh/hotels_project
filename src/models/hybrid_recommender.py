@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
-from .content_based import ContentBasedModel
-from .collaborative import MatrixFactorization
+from src.models.content_based import ContentBasedModel
+from src.models.collaborative import MatrixFactorization
 
 class HybridRecommender(nn.Module):
     """
