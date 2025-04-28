@@ -233,6 +233,25 @@ class DataPreprocessor:
             for col in rating_cols:
                 df[col] = df[col].fillna(df[col].mean())
             
+            # Sentiment analysis for text and title
+            print("Performing sentiment analysis...")
+            df['text_sentiment'] = df['processed_text'].fillna('').apply(self.get_sentiment_scores)
+            df['title_sentiment'] = df['processed_title'].fillna('').apply(self.get_sentiment_scores)
+
+            # Expand sentiment dicts into separate columns
+            df['text_sentiment_compound'] = df['text_sentiment'].apply(lambda x: x['compound'])
+            df['text_sentiment_positive'] = df['text_sentiment'].apply(lambda x: x['pos'])
+            df['text_sentiment_neutral']  = df['text_sentiment'].apply(lambda x: x['neu'])
+            df['text_sentiment_negative'] = df['text_sentiment'].apply(lambda x: x['neg'])
+
+            df['title_sentiment_compound'] = df['title_sentiment'].apply(lambda x: x['compound'])
+            df['title_sentiment_positive'] = df['title_sentiment'].apply(lambda x: x['pos'])
+            df['title_sentiment_neutral']  = df['title_sentiment'].apply(lambda x: x['neu'])
+            df['title_sentiment_negative'] = df['title_sentiment'].apply(lambda x: x['neg'])
+
+            # Optionally drop the intermediate dict columns
+            df = df.drop(columns=['text_sentiment', 'title_sentiment'])
+            
             # TF-IDF from both processed_text and processed_title
             if include_tfidf:
                 print("Generating TF-IDF features...")
