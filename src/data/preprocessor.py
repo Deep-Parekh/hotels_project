@@ -6,7 +6,7 @@ import nltk
 import numpy as np
 import pandas as pd
 from nltk.corpus import stopwords
-from nltk.tokenize import word_tokenize
+from nltk.tokenize import word_tokenize, sent_tokenize
 from nltk.stem import WordNetLemmatizer
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -14,6 +14,10 @@ from tqdm import tqdm
 from pathlib import Path
 from typing import Dict, List, Optional, Union
 import pickle
+import spacy
+import re
+import os
+import en_core_web_sm
 
 class DataPreprocessor:
     """
@@ -26,6 +30,7 @@ class DataPreprocessor:
     - Rating normalization
     - Feature extraction from property_dict
     - Text length features
+    - Aspect-based sentiment analysis
     """
     
     def __init__(self, custom_stop_words: Optional[List[str]] = None):
@@ -55,7 +60,7 @@ class DataPreprocessor:
         
         # Initialize TF-IDF vectorizer
         self.tfidf_vectorizer = TfidfVectorizer(
-            max_features=100,
+            max_features=1000,
             min_df=5,
             max_df=0.95
         )
@@ -83,6 +88,25 @@ class DataPreprocessor:
         self.author_to_id = {}
         self.next_hotel_id = 0
         self.next_author_id = 0
+        
+        # Define aspects and their related terms
+        self.aspects = {
+            'room': ['room', 'bed', 'bathroom', 'shower', 'toilet', 'furniture', 'view'],
+            'service': ['service', 'staff', 'reception', 'concierge', 'housekeeping', 'employee'],
+            'food': ['breakfast', 'restaurant', 'food', 'meal', 'dining', 'cuisine', 'menu'],
+            'location': ['location', 'area', 'neighborhood', 'transport', 'distance', 'access'],
+            'cleanliness': ['clean', 'hygiene', 'maintenance', 'tidy', 'spotless', 'dirt'],
+            'value': ['price', 'value', 'worth', 'cost', 'expensive', 'cheap', 'affordable']
+        }
+        
+        # Load spaCy model for dependency parsing
+        try:
+            self.nlp = en_core_web_sm.load()
+        except:
+            print("Downloading spaCy model...")
+            os.system("python -m spacy download en_core_web_sm")
+            import en_core_web_sm
+            self.nlp = en_core_web_sm.load()
         
         print("DataPreprocessor initialization complete\n")
 
@@ -131,40 +155,104 @@ class DataPreprocessor:
         
         return self.sentiment_analyzer.polarity_scores(text)
 
-    def encode_ids(self, df: pd.DataFrame) -> pd.DataFrame:
-        # Encode hotel_url
-        hotel_ids = []
-        for url in df['hotel_url']:
-            if url not in self.hotel_url_to_id:
-                self.hotel_url_to_id[url] = self.next_hotel_id
-                self.next_hotel_id += 1
-            hotel_ids.append(self.hotel_url_to_id[url])
-        df['hotel_id'] = hotel_ids
+    def extract_aspect_phrases(self, text: str) -> Dict[str, List[str]]:
+        """
+        Extract phrases related to each aspect from the text.
+        
+        Args:
+            text (str): Input text
+            
+        Returns:
+            Dict[str, List[str]]: Dictionary mapping aspects to relevant phrases
+        """
+        if not isinstance(text, str) or not text.strip():
+            return {aspect: [] for aspect in self.aspects}
+        
+        # Process text with spaCy
+        doc = self.nlp(text)
+        
+        # Initialize aspect phrases dictionary
+        aspect_phrases = {aspect: [] for aspect in self.aspects}
+        
+        # Process each sentence
+        for sent in doc.sents:
+            # Find aspect terms in sentence
+            for aspect, terms in self.aspects.items():
+                for token in sent:
+                    if token.lemma_.lower() in terms:
+                        # Extract the phrase around the aspect term
+                        phrase = self._extract_relevant_phrase(token)
+                        if phrase:
+                            aspect_phrases[aspect].append(phrase)
+        
+        return aspect_phrases
 
-        # Encode author
-        author_ids = []
-        for author in df['author']:
-            if author not in self.author_to_id:
-                self.author_to_id[author] = self.next_author_id
-                self.next_author_id += 1
-            author_ids.append(self.author_to_id[author])
-        df['author_id'] = author_ids
+    def _extract_relevant_phrase(self, token) -> str:
+        """
+        Extract a relevant phrase around an aspect term using dependency parsing.
+        
+        Args:
+            token: spaCy token representing an aspect term
+            
+        Returns:
+            str: Extracted phrase
+        """
+        # Get the main verb or adjective related to the aspect
+        relevant_tokens = []
+        
+        # Add the aspect term itself
+        relevant_tokens.append(token)
+        
+        # Add adjectives modifying the aspect
+        for child in token.children:
+            if child.dep_ in ['amod', 'advmod'] or child.pos_ in ['ADJ', 'ADV']:
+                relevant_tokens.append(child)
+        
+        # Add the governing verb and its modifiers
+        if token.head.pos_ == 'VERB':
+            relevant_tokens.append(token.head)
+            for child in token.head.children:
+                if child.dep_ in ['advmod', 'neg'] or child.pos_ == 'ADV':
+                    relevant_tokens.append(child)
+        
+        # Sort tokens by their position in the text
+        relevant_tokens.sort(key=lambda x: x.i)
+        
+        # Join the tokens to form a phrase
+        return ' '.join(token.text for token in relevant_tokens)
 
-        return df
-
-    def save_encodings(self, hotel_path='hotel_url_to_id.pkl', author_path='author_to_id.pkl'):
-        with open(hotel_path, 'wb') as f:
-            pickle.dump(self.hotel_url_to_id, f)
-        with open(author_path, 'wb') as f:
-            pickle.dump(self.author_to_id, f)
-
-    def load_encodings(self, hotel_path='hotel_url_to_id.pkl', author_path='author_to_id.pkl'):
-        with open(hotel_path, 'rb') as f:
-            self.hotel_url_to_id = pickle.load(f)
-        with open(author_path, 'rb') as f:
-            self.author_to_id = pickle.load(f)
-        self.next_hotel_id = max(self.hotel_url_to_id.values(), default=-1) + 1
-        self.next_author_id = max(self.author_to_id.values(), default=-1) + 1
+    def get_aspect_sentiments(self, text: str) -> Dict[str, Dict[str, float]]:
+        """
+        Get sentiment scores for each aspect mentioned in the text.
+        
+        Args:
+            text (str): Input text
+            
+        Returns:
+            Dict[str, Dict[str, float]]: Dictionary mapping aspects to their sentiment scores
+        """
+        # Extract phrases for each aspect
+        aspect_phrases = self.extract_aspect_phrases(text)
+        
+        # Calculate sentiment for each aspect
+        aspect_sentiments = {}
+        for aspect, phrases in aspect_phrases.items():
+            if phrases:
+                # Combine phrases for the aspect
+                aspect_text = ' '.join(phrases)
+                # Get sentiment scores
+                sentiment = self.get_sentiment_scores(aspect_text)
+                aspect_sentiments[aspect] = sentiment
+            else:
+                # No phrases found for this aspect
+                aspect_sentiments[aspect] = {
+                    'compound': 0.0,
+                    'pos': 0.0,
+                    'neu': 0.0,
+                    'neg': 0.0
+                }
+        
+        return aspect_sentiments
 
     def process_reviews(self, df: pd.DataFrame, include_tfidf: bool = False) -> pd.DataFrame:
         """
@@ -175,7 +263,7 @@ class DataPreprocessor:
             include_tfidf (bool): Whether to include TF-IDF features
             
         Returns:
-            pd.DataFrame: Processed DataFrame
+            pd.DataFrame: Processed DataFrame with aspect-based sentiment features
         """
         print(f"\nProcessing chunk with {len(df)} reviews...")
 
@@ -233,8 +321,21 @@ class DataPreprocessor:
             for col in rating_cols:
                 df[col] = df[col].fillna(df[col].mean())
             
-            # Sentiment analysis for text and title
-            print("Performing sentiment analysis...")
+            # Perform aspect-based sentiment analysis
+            print("Performing aspect-based sentiment analysis...")
+            tqdm.pandas(desc="Analyzing aspects")
+            aspect_sentiments = df['text'].fillna('').progress_apply(self.get_aspect_sentiments)
+            
+            # Add aspect sentiment features
+            for aspect in self.aspects:
+                for sentiment_type in ['compound', 'pos', 'neu', 'neg']:
+                    col_name = f'aspect_{aspect}_{sentiment_type}'
+                    df[col_name] = aspect_sentiments.apply(
+                        lambda x: x[aspect][sentiment_type]
+                    )
+            
+            # Overall sentiment analysis for text and title
+            print("Performing overall sentiment analysis...")
             df['text_sentiment'] = df['processed_text'].fillna('').apply(self.get_sentiment_scores)
             df['title_sentiment'] = df['processed_title'].fillna('').apply(self.get_sentiment_scores)
 
@@ -269,158 +370,79 @@ class DataPreprocessor:
             
             print(f"Chunk processing complete: {len(df)} reviews processed\n")
             return df
-            
+
         except Exception as e:
-            self.stats['error_count'] += 1
-            print(f"\nError processing chunk: {str(e)}")
+            print(f"Error processing reviews: {str(e)}")
             raise
 
+    def encode_ids(self, df: pd.DataFrame) -> pd.DataFrame:
+        # Encode hotel_url
+        hotel_ids = []
+        for url in df['hotel_url']:
+            if url not in self.hotel_url_to_id:
+                self.hotel_url_to_id[url] = self.next_hotel_id
+                self.next_hotel_id += 1
+            hotel_ids.append(self.hotel_url_to_id[url])
+        df['hotel_id'] = hotel_ids
+
+        # Encode author
+        author_ids = []
+        for author in df['author']:
+            if author not in self.author_to_id:
+                self.author_to_id[author] = self.next_author_id
+                self.next_author_id += 1
+            author_ids.append(self.author_to_id[author])
+        df['author_id'] = author_ids
+
+        return df
+
+    def save_encodings(self, hotel_path='hotel_url_to_id.pkl', author_path='author_to_id.pkl'):
+        with open(hotel_path, 'wb') as f:
+            pickle.dump(self.hotel_url_to_id, f)
+        with open(author_path, 'wb') as f:
+            pickle.dump(self.author_to_id, f)
+
+    def load_encodings(self, hotel_path='hotel_url_to_id.pkl', author_path='author_to_id.pkl'):
+        with open(hotel_path, 'rb') as f:
+            self.hotel_url_to_id = pickle.load(f)
+        with open(author_path, 'rb') as f:
+            self.author_to_id = pickle.load(f)
+        self.next_hotel_id = max(self.hotel_url_to_id.values(), default=-1) + 1
+        self.next_author_id = max(self.author_to_id.values(), default=-1) + 1
+
     def _validate_review_structure(self, review: Dict) -> None:
-        """
-        Validate the structure of a review dictionary.
-        
-        Args:
-            review (Dict): Review dictionary to validate
-            
-        Raises:
-            ValueError: If required fields are missing or invalid
-        """
-        required_fields = {
-            'hotel_url': str,
-            'author': str,
-            'date': str,
-            'rating': (int, float),
-            'title': str,
-            'text': str
-        }
-        
-        for field, expected_type in required_fields.items():
-            if field not in review:
-                raise ValueError(f"Missing required field: {field}")
-            
-            if not isinstance(review[field], expected_type):
-                raise ValueError(f"Invalid type for {field}: expected {expected_type}, got {type(review[field])}")
+        """Validate the structure of a review dictionary."""
+        missing = [col for col in self.expected_columns if col not in review]
+        if missing:
+            raise ValueError(f"Missing required columns: {missing}")
 
     def get_stats(self) -> Dict:
-        """
-        Get preprocessing statistics.
-        """
-        stats = {
-            **self.stats,
-            'average_reviews_per_chunk': (
-                self.stats['total_reviews'] / self.stats['processed_chunks']
-                if self.stats['processed_chunks'] > 0 else 0
-            )
-        }
-        
-        print("\nPreprocessing Statistics:")
-        print(f"Total chunks processed: {stats['processed_chunks']}")
-        print(f"Total reviews processed: {stats['total_reviews']:,}")
-        print(f"Average reviews per chunk: {stats['average_reviews_per_chunk']:,.1f}")
-        print(f"Total errors encountered: {stats['error_count']}\n")
-        
-        return stats
-
-    def save_processed_data(self, 
-                          df: pd.DataFrame, 
-                          output_path: Union[str, Path],
-                          chunk_size: Optional[int] = None) -> None:
-        """
-        Save processed data to parquet files.
-        
-        Args:
-            df (pd.DataFrame): Processed DataFrame to save
-            output_path (Union[str, Path]): Directory to save the files
-            chunk_size (Optional[int]): Number of rows per chunk
-        """
-        output_path = Path(output_path)
-        output_path.mkdir(parents=True, exist_ok=True)
-        
-        if chunk_size:
-            # Save in chunks
-            num_chunks = len(df) // chunk_size + (1 if len(df) % chunk_size else 0)
-            for i in tqdm(range(num_chunks), desc="Saving chunks"):
-                start_idx = i * chunk_size
-                end_idx = min((i + 1) * chunk_size, len(df))
-                chunk_df = df.iloc[start_idx:end_idx]
-                
-                chunk_file = output_path / f"processed_chunk_{i:04d}.parquet"
-                chunk_df.to_parquet(chunk_file, index=False)
-        else:
-            # Save as a single file
-            output_file = output_path / "processed_data.parquet"
-            df.to_parquet(output_file, index=False)
+        """Get preprocessing statistics."""
+        return self.stats
 
     def get_feature_columns(self) -> List[str]:
-        """
-        Get list of feature columns used for model training.
-        
-        Returns:
-            List[str]: List of feature column names
-        """
-        base_features = [
+        """Get list of feature columns."""
+        return [
+            'hotel_id', 'author_id', 'rating',
             'text_length', 'title_length',
-            'title_sentiment_compound', 'title_sentiment_positive',
-            'title_sentiment_neutral', 'title_sentiment_negative',
             'text_sentiment_compound', 'text_sentiment_positive',
             'text_sentiment_neutral', 'text_sentiment_negative',
-            'sentiment_rating_agreement'
+            'title_sentiment_compound', 'title_sentiment_positive',
+            'title_sentiment_neutral', 'title_sentiment_negative'
+        ] + [
+            f'aspect_{aspect}_{sentiment_type}'
+            for aspect in self.aspects
+            for sentiment_type in ['compound', 'pos', 'neu', 'neg']
         ]
-        
-        rating_features = [
-            f'rating_{rating.replace(" ", "_")}' 
-            for rating in self.property_ratings
-        ]
-        
-        return base_features + rating_features
 
     def get_preprocessing_stats(self, df: pd.DataFrame) -> Dict:
-        """
-        Get statistics about the preprocessed data.
-        
-        Args:
-            df (pd.DataFrame): Processed DataFrame
-            
-        Returns:
-            Dict: Dictionary containing preprocessing statistics
-        """
-        stats = {
-            'num_reviews': len(df),
-            'num_users': df['author'].nunique(),
-            'num_hotels': df['hotel_url'].nunique(),
+        """Get statistics about the preprocessed data."""
+        return {
+            'n_reviews': len(df),
+            'n_hotels': df['hotel_id'].nunique(),
+            'n_authors': df['author_id'].nunique(),
             'rating_stats': df['rating'].describe().to_dict(),
-            'date_range': {
-                'start': df['date'].min(),
-                'end': df['date'].max()
-            },
-            'feature_stats': {
-                col: {
-                    'mean': df[col].mean(),
-                    'std': df[col].std(),
-                    'missing': df[col].isnull().sum()
-                }
-                for col in self.get_feature_columns()
-                if col in df.columns
-            }
+            'text_length_stats': df['text_length'].describe().to_dict(),
+            'title_length_stats': df['title_length'].describe().to_dict()
         }
-        
-        # Add sentiment statistics
-        sentiment_stats = {
-            'title_sentiment': {
-                'mean_compound': df['title_sentiment_compound'].mean(),
-                'positive_ratio': (df['title_sentiment_compound'] > 0).mean(),
-                'negative_ratio': (df['title_sentiment_compound'] < 0).mean(),
-                'neutral_ratio': (df['title_sentiment_compound'] == 0).mean()
-            },
-            'text_sentiment': {
-                'mean_compound': df['text_sentiment_compound'].mean(),
-                'positive_ratio': (df['text_sentiment_compound'] > 0).mean(),
-                'negative_ratio': (df['text_sentiment_compound'] < 0).mean(),
-                'neutral_ratio': (df['text_sentiment_compound'] == 0).mean()
-            },
-            'sentiment_rating_agreement': df['sentiment_rating_agreement'].mean()
-        }
-        
-        stats['sentiment_analysis'] = sentiment_stats
-        return stats
 
